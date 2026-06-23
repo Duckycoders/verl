@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from .chat_template import apply_chat_template
 from .tokenizer import normalize_token_ids
@@ -659,3 +659,475 @@ def _tool_call_function_name(tool_call: dict[str, Any]) -> str | None:
     if isinstance(function, dict) and function.get("name") is not None:
         return str(function["name"])
     return None
+
+class DeepSeekContinuousTokenBuilder(ContinuousTokenBuilder):
+    """DeepSeek V3/R1 boundary handling.
+
+    DeepSeek uses direct concatenation at boundaries (no separator between
+    ``<|end_of_sentence|>`` and the next role marker). The subclass validates
+    key special tokens use correct Unicode (fullwidth vertical line U+FF5C
+    and lower one-eighth block U+2581) to catch encoding regressions early.
+    """
+
+    # DeepSeek special tokens use fullwidth vertical line and lower one-eighth block
+    _EOS_TOKEN = "<\uff5cend\u2581of\u2581sentence\uff5c>"
+    _BOS_TOKEN = "<\uff5cbegin\u2581of\u2581sentence\uff5c>"
+    _USER_TOKEN = "<\uff5cUser\uff5c>"
+    _ASSISTANT_TOKEN = "<\uff5cAssistant\uff5c>"
+
+    def __init__(self, tokenizer: Any, **kwargs: Any):
+        super().__init__(tokenizer, **kwargs)
+        # EOS is the only token guaranteed across V2/V3/R1
+        self._eos_id = _require_token_id(tokenizer, self._EOS_TOKEN)
+        # V3/R1-specific tokens — lookup but tolerate absence (V2-Lite has none)
+        self._bos_id = self._optional_token_id(tokenizer, self._BOS_TOKEN)
+        self._user_id = self._optional_token_id(tokenizer, self._USER_TOKEN)
+        self._assistant_id = self._optional_token_id(tokenizer, self._ASSISTANT_TOKEN)
+
+    @staticmethod
+    def _optional_token_id(tokenizer: Any, token: str) -> int | None:
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        unk = getattr(tokenizer, "unk_token_id", None)
+        if token_id is None or token_id == unk:
+            return None
+        return int(token_id)
+
+    def _merge_non_assistant_token_ids(
+        self, runtime_token_ids: list[int], appended_token_ids: list[int]
+    ) -> MergeResult:
+        # Direct concatenation — DeepSeek template has no inter-turn separator
+        merged_token_ids = list(runtime_token_ids) + list(appended_token_ids)
+        return MergeResult(
+            token_ids=merged_token_ids,
+            appended_token_count=len(appended_token_ids),
+            kind="non_assistant",
+        )
+
+
+# =============================================================================
+# Multimodal (VL) subclasses — Phase 1
+# =============================================================================
+
+
+class VLContinuousTokenMixin:
+    """Shared processor-backed logic for vision-language continuous token builders.
+
+    Provides the multimodal workflow (image extraction, processor rendering,
+    incremental dummy+trim encoding) common to all VL builders. Subclasses
+    combine this mixin with a text-family builder (e.g. QwenContinuousTokenBuilder)
+    via Python MRO so that boundary handling like Qwen's newline insertion or
+    GLM's observation/user trim still applies through ``_merge_non_assistant_token_ids``.
+
+    Subclasses must define class attributes:
+        vision_start_token: str — e.g. "<|vision_start|>"
+        vision_end_token: str — e.g. "<|vision_end|>"
+        merge_size_attr: str = "merge_size" — processor.image_processor attribute name
+
+    Optional hooks:
+        _prepare_mm_messages(messages) — preprocess messages (e.g. flatten content)
+    """
+
+    vision_start_token: str = ""
+    vision_end_token: str = ""
+    merge_size_attr: str = "merge_size"
+
+    def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
+        super().__init__(tokenizer, **kwargs)
+        self.processor = processor
+        self._vision_start_id = _require_token_id(tokenizer, self.vision_start_token)
+        self._vision_end_id = _require_token_id(tokenizer, self.vision_end_token)
+        self._spatial_merge_size = self._resolve_spatial_merge_size(processor)
+
+    def _resolve_spatial_merge_size(self, processor: Any) -> int:
+        ip = getattr(processor, "image_processor", None)
+        if ip is None:
+            return 2
+        value = getattr(ip, self.merge_size_attr, None)
+        if value is None:
+            return 2
+        if isinstance(value, (list, tuple)):
+            value = value[0]
+        return int(value)
+
+    @classmethod
+    def supports_multimodal(cls) -> bool:
+        return True
+
+    def count_vision_tokens(self, image_grid_thw_row: tuple[int, int, int]) -> int:
+        t, h, w = image_grid_thw_row
+        merge = self._spatial_merge_size
+        return t * (h // merge) * (w // merge)
+
+    def extract_vision_placeholders(self, token_ids: Sequence[int]) -> list[tuple[int, int]]:
+        """Find all <vision_start>...<vision_end> spans (exclusive of markers)."""
+        spans: list[tuple[int, int]] = []
+        i = 0
+        n = len(token_ids)
+        while i < n:
+            if token_ids[i] == self._vision_start_id:
+                j = i + 1
+                while j < n and token_ids[j] != self._vision_end_id:
+                    j += 1
+                if j < n:
+                    spans.append((i + 1, j))
+                else:
+                    logger.warning(
+                        "Unmatched %s at position %d", self.vision_start_token, i
+                    )
+                i = j + 1
+            else:
+                i += 1
+        return spans
+
+    def _prepare_mm_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Hook for subclass message preprocessing. Default: pass through."""
+        return messages
+
+    def _extract_images_from_messages(self, messages: list[dict[str, Any]]) -> list[Any]:
+        """Extract image references from OpenAI-style content blocks."""
+        images: list[Any] = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
+                        image_ref = block.get("image")
+                        if not image_ref:
+                            image_url = block.get("image_url")
+                            if isinstance(image_url, dict):
+                                image_ref = image_url.get("url")
+                            elif isinstance(image_url, str):
+                                image_ref = image_url
+                        if image_ref is not None:
+                            images.append(image_ref)
+        return images
+
+    def render_tokens_with_mm(
+        self,
+        messages: list[dict[str, Any]],
+        images: list[Any],
+        *,
+        add_generation_prompt: bool = True,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        """Render messages through the processor (full render with all images)."""
+        from .chat_template import apply_chat_template
+        from .tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+
+        prepared = self._prepare_mm_messages(messages)
+        text = apply_chat_template(
+            self.tokenizer, prepared, tokenize=False,
+            add_generation_prompt=add_generation_prompt, **template_kwargs,
+        )
+
+        proc_kwargs = dict(mm_processor_kwargs or {})
+        processor_output = build_multimodal_processor_inputs(
+            self.processor, text=text, images=images if images else None,
+            mm_processor_kwargs=proc_kwargs if proc_kwargs else None,
+        )
+        return normalize_token_ids(processor_output["input_ids"])
+
+    def _render_incremental_with_mm(
+        self,
+        messages: list[dict[str, Any]],
+        images: list[Any],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        """Render incremental messages via dummy+trim (single processor call)."""
+        from .chat_template import apply_chat_template
+        from .tokenizer import build_multimodal_processor_inputs, normalize_token_ids
+
+        template_kwargs = dict(self.chat_template_kwargs)
+        if tools:
+            template_kwargs["tools"] = tools
+
+        prefix_msgs = [_SYNTHETIC_SYSTEM_MESSAGE, _SYNTHETIC_USER_MESSAGE]
+        prefix_text = apply_chat_template(
+            self.tokenizer, prefix_msgs, tokenize=False,
+            add_generation_prompt=False, **template_kwargs,
+        )
+        prefix_token_ids = normalize_token_ids(
+            self.tokenizer.encode(prefix_text, add_special_tokens=False)
+        )
+
+        prepared = self._prepare_mm_messages(messages)
+        full_text = apply_chat_template(
+            self.tokenizer, prefix_msgs + prepared, tokenize=False,
+            add_generation_prompt=True, **template_kwargs,
+        )
+        processor_output = build_multimodal_processor_inputs(
+            self.processor, text=full_text, images=images if images else None,
+        )
+
+        all_ids = normalize_token_ids(processor_output["input_ids"])
+        return _token_suffix_after_prefix(
+            prefix_token_ids, all_ids,
+            context="multimodal synthetic prefix",
+        )
+
+    def build_initial_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        images = self._extract_images_from_messages(messages)
+        if not images:
+            return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
+        return self.render_tokens_with_mm(messages, images, add_generation_prompt=True, tools=tools)
+
+    def merge_tokens(
+        self,
+        previous_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
+        runtime_token_ids: list[int],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> MergeResult:
+        """Merge tokens with multimodal awareness.
+
+        If new images appear, uses single processor call (dummy+trim) to get
+        incremental token_ids, then applies text-family boundary handling via
+        ``_merge_non_assistant_token_ids`` (provided by parent class through MRO).
+        """
+        self._assert_append_only(previous_messages, updated_messages)
+        appended_messages = updated_messages[len(previous_messages):]
+
+        new_images = self._extract_images_from_messages(appended_messages)
+        if not new_images:
+            appended_ids = self.tokenize_non_assistant_incremental_messages(
+                previous_messages, updated_messages, tools=tools
+            )
+            return self._merge_non_assistant_token_ids(runtime_token_ids, appended_ids)
+
+        appended_token_ids = self._render_incremental_with_mm(
+            appended_messages, new_images, tools=tools
+        )
+        return self._merge_non_assistant_token_ids(runtime_token_ids, appended_token_ids)
+
+
+class QwenVLContinuousTokenBuilder(VLContinuousTokenMixin, QwenContinuousTokenBuilder):
+    """Qwen Vision-Language: Qwen ChatML newline patch + VL processor logic.
+
+    Handles Qwen2-VL, Qwen2.5-VL, Qwen3-VL, and Qwen3-VL-MoE.
+    """
+
+    vision_start_token = "<|vision_start|>"
+    vision_end_token = "<|vision_end|>"
+    merge_size_attr = "merge_size"
+
+
+class MiMoVLContinuousTokenBuilder(VLContinuousTokenMixin, QwenContinuousTokenBuilder):
+    """MiMo-VL: shares Qwen2.5-VL architecture, but template needs content flattening.
+
+    The MiMo chat template only handles string content, so list-format multimodal
+    content blocks must be flattened into placeholder strings before rendering.
+    """
+
+    vision_start_token = "<|vision_start|>"
+    vision_end_token = "<|vision_end|>"
+    merge_size_attr = "merge_size"
+
+    def _prepare_mm_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self._flatten_multimodal_content(messages)
+
+    def _flatten_multimodal_content(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Convert list-content to string with vision placeholders for MiMo-VL template."""
+        flat: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                flat.append(msg)
+                continue
+            parts: list[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype in ("image", "image_url"):
+                    parts.append("<|vision_start|><|image_pad|><|vision_end|>")
+                elif btype == "video":
+                    parts.append("<|vision_start|><|video_pad|><|vision_end|>")
+                elif btype == "text":
+                    parts.append(block.get("text", ""))
+            flat.append({**msg, "content": "".join(parts)})
+        return flat
+
+    def _render_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        flat = self._flatten_multimodal_content(messages)
+        return super()._render_tokens(flat, add_generation_prompt=add_generation_prompt, tools=tools)
+
+
+class GLM4VContinuousTokenBuilder(VLContinuousTokenMixin, GLMContinuousTokenBuilder):
+    """GLM-4V / GLM-4.5-VL: GLM observation/user trim + VL processor logic."""
+
+    vision_start_token = "<|begin_of_image|>"
+    vision_end_token = "<|end_of_image|>"
+    merge_size_attr = "merge_size"
+
+
+class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilder):
+    """Kimi-VL (MoonViT): direct concatenation + VL processor logic.
+
+    Uses <|media_start|>/<|media_end|> wrappers and merge_kernel_size attribute.
+    """
+
+    vision_start_token = "<|media_start|>"
+    vision_end_token = "<|media_end|>"
+    merge_size_attr = "merge_kernel_size"
+
+
+
+
+
+class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
+    """DeepSeek-VL2 continuous token builder.
+
+    VL2 uses its own DeepseekVLV2Processor that handles both conversation
+    formatting and image token expansion in a single __call__. It does NOT
+    support standard apply_chat_template, so all rendering goes through the
+    processor directly.
+
+    The processor produces stable prefixes: full_render[:len(prev)] == prev,
+    so we use full render + prefix diff (like the original CT approach).
+    """
+
+    def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
+        super().__init__(tokenizer, **kwargs)
+        self.processor = processor
+        self._image_token_id = _require_token_id(tokenizer, "<image>")
+
+    @classmethod
+    def supports_multimodal(cls) -> bool:
+        return True
+
+    def count_vision_tokens(self, spatial_crop_row: tuple[int, int]) -> int:
+        """VL2 formula: 211 + 196*m*n + 14*m."""
+        m, n = spatial_crop_row
+        return 211 + 196 * m * n + 14 * m
+
+    def extract_vision_placeholders(self, token_ids: Sequence[int]) -> list[tuple[int, int]]:
+        """Find contiguous runs of <image> tokens."""
+        spans: list[tuple[int, int]] = []
+        i = 0
+        n = len(token_ids)
+        while i < n:
+            if token_ids[i] == self._image_token_id:
+                j = i + 1
+                while j < n and token_ids[j] == self._image_token_id:
+                    j += 1
+                spans.append((i, j))
+                i = j
+            else:
+                i += 1
+        return spans
+
+    def _extract_images_from_messages(self, messages: list[dict[str, Any]]) -> list[Any]:
+        """Extract image references from content blocks."""
+        images: list[Any] = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") in ("image", "image_url"):
+                        image_ref = block.get("image")
+                        if not image_ref:
+                            image_url = block.get("image_url")
+                            if isinstance(image_url, dict):
+                                image_ref = image_url.get("url")
+                            elif isinstance(image_url, str):
+                                image_ref = image_url
+                        if image_ref is not None:
+                            images.append(image_ref)
+        return images
+
+    def _to_vl2_conversation(
+        self, messages: list[dict[str, Any]], images: list[Any], add_generation_prompt: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[Any]]:
+        """Convert OpenAI-style messages to VL2 conversation format."""
+        conv: list[dict[str, Any]] = []
+        img_idx = 0
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts: list[str] = []
+                msg_images: list[Any] = []
+                for block in content:
+                    if isinstance(block, dict):
+                        btype = block.get("type", "")
+                        if btype in ("image", "image_url") and img_idx < len(images):
+                            parts.append("<image>")
+                            msg_images.append(images[img_idx])
+                            img_idx += 1
+                        elif btype == "text":
+                            parts.append(block.get("text", ""))
+                content = "".join(parts)
+            else:
+                msg_images = []
+
+            if role == "user":
+                conv.append({"role": "<|User|>", "content": content, "images": msg_images})
+            elif role == "assistant":
+                conv.append({"role": "<|Assistant|>", "content": content})
+            elif role == "system":
+                conv.append({"role": "<|User|>", "content": content, "images": []})
+
+        if add_generation_prompt:
+            if not conv or conv[-1].get("role") != "<|Assistant|>" or conv[-1].get("content"):
+                conv.append({"role": "<|Assistant|>", "content": ""})
+        return conv, images
+
+    def _render_via_processor(
+        self, messages: list[dict[str, Any]], images: list[Any], add_generation_prompt: bool = True,
+    ) -> list[int]:
+        """Render messages through DeepseekVLV2Processor."""
+        from .tokenizer import normalize_token_ids
+        conv, all_images = self._to_vl2_conversation(messages, images, add_generation_prompt)
+        out = self.processor.__call__(conversations=conv, images=all_images, force_batchify=True)
+        return normalize_token_ids(out.input_ids[0].tolist())
+
+    def build_initial_tokens(
+        self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        images = self._extract_images_from_messages(messages)
+        if not images:
+            return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
+        return self._render_via_processor(messages, images, add_generation_prompt=True)
+
+    def merge_non_assistant_tokens(
+        self,
+        previous_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
+        runtime_token_ids: list[int],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> MergeResult:
+        """Merge tokens: always use processor + prefix diff for VL2.
+
+        VL2 tokenizer has no chat_template, so all rendering goes through
+        the processor. Prefix stability is guaranteed by the processor.
+        """
+        self._assert_append_only(previous_messages, updated_messages)
+
+        # Always use full render + prefix diff (VL2 has no apply_chat_template)
+        all_images = self._extract_images_from_messages(updated_messages)
+        full_token_ids = self._render_via_processor(updated_messages, all_images, add_generation_prompt=True)
+
+        prefix_len = len(runtime_token_ids)
+        appended_token_ids = full_token_ids[prefix_len:]
+        return self._merge_non_assistant_token_ids(runtime_token_ids, appended_token_ids)

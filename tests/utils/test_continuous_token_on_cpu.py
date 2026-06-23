@@ -18,12 +18,18 @@ import pytest
 
 from verl.utils.tokenizer.continuous_token import (
     ContinuousTokenBuilder,
+    DeepSeekContinuousTokenBuilder,
+    DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
+    GLM4VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
     GptOssContinuousTokenBuilder,
+    KimiVLContinuousTokenBuilder,
     MergeResult,
+    MiMoVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
+    QwenVLContinuousTokenBuilder,
 )
 from verl.utils.tokenizer.continuous_token_wiring import (
     CONTINUOUS_TOKEN_BUILDER_FAMILIES,
@@ -234,6 +240,14 @@ def test_builtin_family_surface():
         "glm5",
         "gemma4",
         "gptoss",
+        "deepseek",
+        "qwenvl",
+        "qwen25vl",
+        "qwen3vl",
+        "mimovl",
+        "kimivl",
+        "glm4v",
+        "deepseekvl2",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
@@ -254,6 +268,14 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.GLM5, GLMContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GEMMA4, Gemma4ContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GPTOSS, GptOssContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEK, DeepSeekContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.QWEN_VL, QwenVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.QWEN25_VL, QwenVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.QWEN3_VL, QwenVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.MIMO_VL, MiMoVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.GLM4V, GLM4VContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
     ],
 )
 def test_builtin_family_class_mapping(family, builder_cls):
@@ -274,7 +296,14 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("Qwen/Qwen3.5-35B-A3B", ContinuousTokenModelFamily.QWEN35),
         ("Qwen/Qwen2.5-7B-Instruct", ContinuousTokenModelFamily.QWEN25),
         ("Qwen/Qwen3-8B", ContinuousTokenModelFamily.QWEN3),
-        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEFAULT),
+        ("deepseek-ai/DeepSeek-R1", ContinuousTokenModelFamily.DEEPSEEK),
+        ("deepseek-ai/DeepSeek-V3", ContinuousTokenModelFamily.DEEPSEEK),
+        ("Qwen/Qwen2.5-VL-7B-Instruct", ContinuousTokenModelFamily.QWEN25_VL),
+        ("Qwen/Qwen3-VL-4B", ContinuousTokenModelFamily.QWEN3_VL),
+        ("XiaomiMiMo/MiMo-VL-7B", ContinuousTokenModelFamily.MIMO_VL),
+        ("moonshotai/Kimi-VL-A3B-Instruct", ContinuousTokenModelFamily.KIMI_VL),
+        ("zai-org/GLM-4.5V", ContinuousTokenModelFamily.GLM4V),
+        ("deepseek-ai/deepseek-vl2-tiny", ContinuousTokenModelFamily.DEEPSEEK_VL2),
     ],
 )
 def test_auto_family_inference(model_path, expected):

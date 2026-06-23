@@ -22,11 +22,17 @@ from typing import Any
 
 from .continuous_token import (
     ContinuousTokenBuilder,
+    DeepSeekContinuousTokenBuilder,
+    DeepSeekVL2ContinuousTokenBuilder,
     Gemma4ContinuousTokenBuilder,
+    GLM4VContinuousTokenBuilder,
     GLMContinuousTokenBuilder,
     GptOssContinuousTokenBuilder,
+    KimiVLContinuousTokenBuilder,
+    MiMoVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
+    QwenVLContinuousTokenBuilder,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +53,15 @@ class ContinuousTokenModelFamily(StrEnum):
     GLM5 = "glm5"
     GEMMA4 = "gemma4"
     GPTOSS = "gptoss"
+    DEEPSEEK = "deepseek"
+    # Multimodal (VL) families
+    QWEN_VL = "qwenvl"
+    QWEN25_VL = "qwen25vl"
+    QWEN3_VL = "qwen3vl"
+    MIMO_VL = "mimovl"
+    KIMI_VL = "kimivl"
+    GLM4V = "glm4v"
+    DEEPSEEK_VL2 = "deepseekvl2"
 
 
 _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] = {
@@ -63,6 +78,15 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.GLM5: GLMContinuousTokenBuilder,
     ContinuousTokenModelFamily.GEMMA4: Gemma4ContinuousTokenBuilder,
     ContinuousTokenModelFamily.GPTOSS: GptOssContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEK: DeepSeekContinuousTokenBuilder,
+    # Multimodal (VL) families
+    ContinuousTokenModelFamily.QWEN_VL: QwenVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN25_VL: QwenVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.QWEN3_VL: QwenVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.MIMO_VL: MiMoVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.KIMI_VL: KimiVLContinuousTokenBuilder,
+    ContinuousTokenModelFamily.GLM4V: GLM4VContinuousTokenBuilder,
+    ContinuousTokenModelFamily.DEEPSEEK_VL2: DeepSeekVL2ContinuousTokenBuilder,
 }
 
 CONTINUOUS_TOKEN_BUILDER_FAMILIES = tuple(family.value for family in _CONTINUOUS_TOKEN_BUILDER_REGISTRY)
@@ -135,6 +159,26 @@ def infer_continuous_token_model_family(
         return ContinuousTokenModelFamily.GEMMA4
     if any(marker in haystack for marker in ("gpt-oss", "gpt_oss")) or "gptoss" in compact:
         return ContinuousTokenModelFamily.GPTOSS
+    # --- VL families (must match before text families) ---
+    if any(marker in haystack for marker in ("mimo-vl", "mimo_vl", "mimovl")):
+        return ContinuousTokenModelFamily.MIMO_VL
+    if any(marker in haystack for marker in ("qwen3-vl", "qwen3_vl")) or "qwen3vl" in compact:
+        return ContinuousTokenModelFamily.QWEN3_VL
+    if any(marker in haystack for marker in ("qwen2.5-vl", "qwen2_5-vl", "qwen2_5_vl")) or "qwen25vl" in compact:
+        return ContinuousTokenModelFamily.QWEN25_VL
+    if any(marker in haystack for marker in ("qwen2-vl", "qwen2_vl")) or "qwen2vl" in compact:
+        return ContinuousTokenModelFamily.QWEN_VL
+    if any(marker in haystack for marker in ("kimi-vl", "kimi_vl")) or "kimivl" in compact:
+        return ContinuousTokenModelFamily.KIMI_VL
+    if any(marker in haystack for marker in ("glm-4v", "glm4v", "glm-4.5v", "glm-4.1v", "glm-4.5-vl", "glm-4.1-vl")):
+        return ContinuousTokenModelFamily.GLM4V
+    # DeepSeek-VL2
+    if "deepseek" in compact and "vl" in compact:
+        return ContinuousTokenModelFamily.DEEPSEEK_VL2
+    # DeepSeek text (V2/V3/R1)
+    if "deepseek" in compact and "vl" not in compact:
+        return ContinuousTokenModelFamily.DEEPSEEK
+    # --- Existing text families ---
     if "minimaxm27" in compact:
         return ContinuousTokenModelFamily.MINIMAX_M27
     if "minimaxm25" in compact:
