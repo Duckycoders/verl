@@ -32,6 +32,22 @@ MergeKind = Literal["assistant", "non_assistant"]
 logger = logging.getLogger(__name__)
 
 
+def _token_suffix_after_prefix(
+    prefix_ids: list[int] | Sequence[int],
+    all_ids: list[int] | Sequence[int],
+    *,
+    context: str = "",
+) -> list[int]:
+    """Return all_ids[len(prefix_ids):] after verifying the prefix matches."""
+    n = len(prefix_ids)
+    if list(all_ids[:n]) != list(prefix_ids):
+        raise ValueError(
+            f"Continuous Token prefix mismatch ({context}): "
+            f"expected {list(prefix_ids[:10])}... but got {list(all_ids[:10])}..."
+        )
+    return list(all_ids[n:])
+
+
 @dataclass(frozen=True)
 class MergeResult:
     """Merged runtime tokens plus the edits callers need to align metadata.
@@ -749,10 +765,6 @@ class VLContinuousTokenMixin:
             value = value[0]
         return int(value)
 
-    @classmethod
-    def supports_multimodal(cls) -> bool:
-        return True
-
     def count_vision_tokens(self, image_grid_thw_row: tuple[int, int, int]) -> int:
         t, h, w = image_grid_thw_row
         merge = self._spatial_merge_size
@@ -882,7 +894,7 @@ class VLContinuousTokenMixin:
             return self._render_tokens(messages, add_generation_prompt=True, tools=tools)
         return self.render_tokens_with_mm(messages, images, add_generation_prompt=True, tools=tools)
 
-    def merge_tokens(
+    def merge_non_assistant_tokens(
         self,
         previous_messages: list[dict[str, Any]],
         updated_messages: list[dict[str, Any]],
@@ -890,7 +902,7 @@ class VLContinuousTokenMixin:
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> MergeResult:
-        """Merge tokens with multimodal awareness.
+        """Override base: multimodal-aware merge.
 
         If new images appear, uses single processor call (dummy+trim) to get
         incremental token_ids, then applies text-family boundary handling via
@@ -1010,10 +1022,6 @@ class DeepSeekVL2ContinuousTokenBuilder(DeepSeekContinuousTokenBuilder):
         super().__init__(tokenizer, **kwargs)
         self.processor = processor
         self._image_token_id = _require_token_id(tokenizer, "<image>")
-
-    @classmethod
-    def supports_multimodal(cls) -> bool:
-        return True
 
     def count_vision_tokens(self, spatial_crop_row: tuple[int, int]) -> int:
         """VL2 formula: 211 + 196*m*n + 14*m."""

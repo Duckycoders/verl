@@ -374,7 +374,7 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.messages.extend(add_messages)
 
-        if self.enable_continuous_token and not new_images_this_turn:
+        if self.enable_continuous_token:
             schemas = getattr(agent_data, "_active_tool_schemas", self.tool_schemas)
             merge_result, response_mask, response_logprobs = await self.ct_merge_non_assistant_msg(
                 previous_messages,
