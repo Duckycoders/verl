@@ -746,6 +746,8 @@ class VLContinuousTokenMixin:
     vision_start_token: str = ""
     vision_end_token: str = ""
     merge_size_attr: str = "merge_size"
+    image_placeholder: str = ""
+    video_placeholder: str = ""
 
     def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
@@ -804,6 +806,35 @@ class VLContinuousTokenMixin:
     def _prepare_mm_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Hook for subclass message preprocessing. Default: pass through."""
         return messages
+
+    def _flatten_multimodal_content(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Convert list-content to string with placeholders for template rendering.
+
+        Uses ``self.image_placeholder`` and ``self.video_placeholder`` to substitute
+        content blocks. Subclasses that need content flattening set these attributes
+        and call this method from ``_prepare_mm_messages`` and ``_render_tokens``.
+        """
+        flat: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                flat.append(msg)
+                continue
+            parts: list[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype in ("image", "image_url"):
+                    parts.append(self.image_placeholder)
+                elif btype == "video" and self.video_placeholder:
+                    parts.append(self.video_placeholder)
+                elif btype == "text":
+                    parts.append(block.get("text", ""))
+            flat.append({**msg, "content": "".join(parts)})
+        return flat
 
     def _extract_images_from_messages(self, messages: list[dict[str, Any]]) -> list[Any]:
         """Extract image references from OpenAI-style content blocks."""
@@ -955,33 +986,11 @@ class MiMoVLContinuousTokenBuilder(VLContinuousTokenMixin, QwenContinuousTokenBu
     vision_start_token = "<|vision_start|>"
     vision_end_token = "<|vision_end|>"
     merge_size_attr = "merge_size"
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
 
     def _prepare_mm_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return self._flatten_multimodal_content(messages)
-
-    def _flatten_multimodal_content(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Convert list-content to string with vision placeholders for MiMo-VL template."""
-        flat: list[dict[str, Any]] = []
-        for msg in messages:
-            content = msg.get("content")
-            if not isinstance(content, list):
-                flat.append(msg)
-                continue
-            parts: list[str] = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type", "")
-                if btype in ("image", "image_url"):
-                    parts.append("<|vision_start|><|image_pad|><|vision_end|>")
-                elif btype == "video":
-                    parts.append("<|vision_start|><|video_pad|><|vision_end|>")
-                elif btype == "text":
-                    parts.append(block.get("text", ""))
-            flat.append({**msg, "content": "".join(parts)})
-        return flat
 
     def _render_tokens(
         self,
@@ -1024,31 +1033,11 @@ class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousT
     vision_start_token = ""
     vision_end_token = ""
     merge_size_attr = ""
+    image_placeholder = "<image>"
+    video_placeholder = ""
 
     def _prepare_mm_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return self._flatten_multimodal_content(messages)
-
-    def _flatten_multimodal_content(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Convert list-content to string with <image> placeholders for MiniMax-VL template."""
-        flat: list[dict[str, Any]] = []
-        for msg in messages:
-            content = msg.get("content")
-            if not isinstance(content, list):
-                flat.append(msg)
-                continue
-            parts: list[str] = []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type", "")
-                if btype in ("image", "image_url"):
-                    parts.append("<image>")
-                elif btype == "text":
-                    parts.append(block.get("text", ""))
-            flat.append({**msg, "content": "".join(parts)})
-        return flat
 
     def _render_tokens(
         self,
