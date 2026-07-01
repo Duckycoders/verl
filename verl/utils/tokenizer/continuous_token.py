@@ -750,11 +750,19 @@ class VLContinuousTokenMixin:
     def __init__(self, tokenizer: Any, processor: Any, **kwargs: Any):
         super().__init__(tokenizer, **kwargs)
         self.processor = processor
-        self._vision_start_id = _require_token_id(tokenizer, self.vision_start_token)
-        self._vision_end_id = _require_token_id(tokenizer, self.vision_end_token)
+        self._vision_start_id = (
+            _require_token_id(tokenizer, self.vision_start_token)
+            if self.vision_start_token else None
+        )
+        self._vision_end_id = (
+            _require_token_id(tokenizer, self.vision_end_token)
+            if self.vision_end_token else None
+        )
         self._spatial_merge_size = self._resolve_spatial_merge_size(processor)
 
     def _resolve_spatial_merge_size(self, processor: Any) -> int:
+        if not self.merge_size_attr:
+            return 0
         ip = getattr(processor, "image_processor", None)
         if ip is None:
             return 2
@@ -772,6 +780,8 @@ class VLContinuousTokenMixin:
 
     def extract_vision_placeholders(self, token_ids: Sequence[int]) -> list[tuple[int, int]]:
         """Find all <vision_start>...<vision_end> spans (exclusive of markers)."""
+        if self._vision_start_id is None:
+            return []
         spans: list[tuple[int, int]] = []
         i = 0
         n = len(token_ids)
@@ -1001,6 +1011,54 @@ class KimiVLContinuousTokenBuilder(VLContinuousTokenMixin, ContinuousTokenBuilde
     vision_start_token = "<|media_start|>"
     vision_end_token = "<|media_end|>"
     merge_size_attr = "merge_kernel_size"
+
+
+class MiniMaxVLContinuousTokenBuilder(VLContinuousTokenMixin, MiniMaxContinuousTokenBuilder):
+    """MiniMax-VL-01: LLaVA-style image expansion + MiniMax [e~[ boundary.
+
+    MiniMax-VL uses a single ``<image>`` placeholder that the processor expands
+    into image feature tokens (no paired vision start/end markers). Content
+    blocks are flattened into placeholder strings before template rendering.
+    """
+
+    vision_start_token = ""
+    vision_end_token = ""
+    merge_size_attr = ""
+
+    def _prepare_mm_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self._flatten_multimodal_content(messages)
+
+    def _flatten_multimodal_content(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Convert list-content to string with <image> placeholders for MiniMax-VL template."""
+        flat: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                flat.append(msg)
+                continue
+            parts: list[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype in ("image", "image_url"):
+                    parts.append("<image>")
+                elif btype == "text":
+                    parts.append(block.get("text", ""))
+            flat.append({**msg, "content": "".join(parts)})
+        return flat
+
+    def _render_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        flat = self._flatten_multimodal_content(messages)
+        return super()._render_tokens(flat, add_generation_prompt=add_generation_prompt, tools=tools)
 
 
 

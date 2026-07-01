@@ -28,6 +28,7 @@ from verl.utils.tokenizer.continuous_token import (
     MergeResult,
     MiMoVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
+    MiniMaxVLContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
 )
@@ -248,6 +249,7 @@ def test_builtin_family_surface():
         "kimivl",
         "glm4v",
         "deepseekvl2",
+        "minimaxvl",
     )
     assert list_continuous_token_builder_families() == CONTINUOUS_TOKEN_BUILDER_FAMILIES
 
@@ -276,6 +278,7 @@ def test_builtin_family_surface():
         (ContinuousTokenModelFamily.KIMI_VL, KimiVLContinuousTokenBuilder),
         (ContinuousTokenModelFamily.GLM4V, GLM4VContinuousTokenBuilder),
         (ContinuousTokenModelFamily.DEEPSEEK_VL2, DeepSeekVL2ContinuousTokenBuilder),
+        (ContinuousTokenModelFamily.MINIMAX_VL, MiniMaxVLContinuousTokenBuilder),
     ],
 )
 def test_builtin_family_class_mapping(family, builder_cls):
@@ -304,6 +307,7 @@ def test_builtin_family_class_mapping(family, builder_cls):
         ("moonshotai/Kimi-VL-A3B-Instruct", ContinuousTokenModelFamily.KIMI_VL),
         ("zai-org/GLM-4.5V", ContinuousTokenModelFamily.GLM4V),
         ("deepseek-ai/deepseek-vl2-tiny", ContinuousTokenModelFamily.DEEPSEEK_VL2),
+        ("MiniMaxAI/MiniMax-VL-01", ContinuousTokenModelFamily.MINIMAX_VL),
     ],
 )
 def test_auto_family_inference(model_path, expected):

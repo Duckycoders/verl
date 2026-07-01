@@ -31,6 +31,7 @@ from .continuous_token import (
     KimiVLContinuousTokenBuilder,
     MiMoVLContinuousTokenBuilder,
     MiniMaxContinuousTokenBuilder,
+    MiniMaxVLContinuousTokenBuilder,
     QwenContinuousTokenBuilder,
     QwenVLContinuousTokenBuilder,
 )
@@ -62,6 +63,7 @@ class ContinuousTokenModelFamily(StrEnum):
     KIMI_VL = "kimivl"
     GLM4V = "glm4v"
     DEEPSEEK_VL2 = "deepseekvl2"
+    MINIMAX_VL = "minimaxvl"
 
 
 _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] = {
@@ -87,6 +89,7 @@ _CONTINUOUS_TOKEN_BUILDER_REGISTRY: dict[ContinuousTokenModelFamily, type[Any]] 
     ContinuousTokenModelFamily.KIMI_VL: KimiVLContinuousTokenBuilder,
     ContinuousTokenModelFamily.GLM4V: GLM4VContinuousTokenBuilder,
     ContinuousTokenModelFamily.DEEPSEEK_VL2: DeepSeekVL2ContinuousTokenBuilder,
+    ContinuousTokenModelFamily.MINIMAX_VL: MiniMaxVLContinuousTokenBuilder,
 }
 
 CONTINUOUS_TOKEN_BUILDER_FAMILIES = tuple(family.value for family in _CONTINUOUS_TOKEN_BUILDER_REGISTRY)
@@ -172,6 +175,9 @@ def infer_continuous_token_model_family(
         return ContinuousTokenModelFamily.KIMI_VL
     if any(marker in haystack for marker in ("glm-4v", "glm4v", "glm-4.5v", "glm-4.1v", "glm-4.5-vl", "glm-4.1-vl")):
         return ContinuousTokenModelFamily.GLM4V
+    # MiniMax-VL (must match before text-only minimax families)
+    if any(marker in haystack for marker in ("minimax-vl", "minimax_vl")) or "minimaxvl" in compact:
+        return ContinuousTokenModelFamily.MINIMAX_VL
     # DeepSeek-VL2
     if "deepseek" in compact and "vl" in compact:
         return ContinuousTokenModelFamily.DEEPSEEK_VL2
