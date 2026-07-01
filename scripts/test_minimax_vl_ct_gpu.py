@@ -56,6 +56,35 @@ def legacy_full_render(processor, messages, images):
     return inputs["input_ids"][0].tolist()
 
 
+def legacy_full_render_no_gen(processor, messages, images):
+    """Same as legacy_full_render but with add_generation_prompt=False."""
+    flat_messages = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    btype = block.get("type", "")
+                    if btype in ("image", "image_url"):
+                        parts.append("<image>")
+                    elif btype == "text":
+                        parts.append(block.get("text", ""))
+            flat_messages.append({**msg, "content": "".join(parts)})
+        else:
+            flat_messages.append(msg)
+
+    prompt = processor.tokenizer.apply_chat_template(
+        flat_messages, tokenize=False, add_generation_prompt=False
+    )
+    inputs = processor(
+        images=images if images else None,
+        text=prompt,
+        return_tensors="pt",
+    )
+    return inputs["input_ids"][0].tolist()
+
+
 def extract_images_from_messages(messages):
     """Extract PIL images from OpenAI-style content blocks."""
     images = []
@@ -122,11 +151,15 @@ def test_minimax_vl(model_name):
     # --- Scenario 2: merge_non_assistant_tokens (text-only append) ---
     print("\n  [Scenario 2] merge_non_assistant_tokens (text-only append)")
     assistant_text = "This is a colorful image with various patterns."
-    assistant_ids = tokenizer.encode(assistant_text, add_special_tokens=False)
-    # Real model output ends with EOS token (e.g. [e~[ for MiniMax)
-    eos_id = tokenizer.eos_token_id
-    if eos_id is not None and (not assistant_ids or assistant_ids[-1] != eos_id):
-        assistant_ids = assistant_ids + [eos_id]
+
+    # Extract realistic assistant tokens by diffing full renders:
+    # "model output" = render(messages + assistant, no gen prompt) - render(messages, with gen prompt)
+    messages_with_asst = messages_1 + [{"role": "assistant", "content": assistant_text}]
+    legacy_with_asst = legacy_full_render_no_gen(processor, messages_with_asst, [img1])
+    # The assistant tokens are everything after the initial prompt
+    assistant_ids = legacy_with_asst[len(ct_ids):]
+    print(f"    Extracted assistant tokens: {len(assistant_ids)} tokens")
+
     assistant_merge = builder.merge_assistant_tokens(ct_ids, assistant_ids)
     runtime_after_asst = assistant_merge.token_ids
 
@@ -154,6 +187,10 @@ def test_minimax_vl(model_name):
         )
         if diff_pos is not None:
             print(f"    First diff at pos {diff_pos}: CT={ct_ids_2[diff_pos]} vs Legacy={legacy_ids_2[diff_pos]}")
+            ctx_start = max(0, diff_pos - 3)
+            ctx_end = min(len(ct_ids_2), diff_pos + 4)
+            print(f"    CT context [{ctx_start}:{ctx_end}]: {ct_ids_2[ctx_start:ctx_end]}")
+            print(f"    Legacy context [{ctx_start}:{ctx_end}]: {legacy_ids_2[ctx_start:ctx_end]}")
         if len(ct_ids_2) != len(legacy_ids_2):
             print(f"    Length diff: {len(ct_ids_2) - len(legacy_ids_2)} tokens")
         return False
