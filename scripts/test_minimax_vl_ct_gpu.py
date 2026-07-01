@@ -123,6 +123,10 @@ def test_minimax_vl(model_name):
     print("\n  [Scenario 2] merge_non_assistant_tokens (text-only append)")
     assistant_text = "This is a colorful image with various patterns."
     assistant_ids = tokenizer.encode(assistant_text, add_special_tokens=False)
+    # Real model output ends with EOS token (e.g. [e~[ for MiniMax)
+    eos_id = tokenizer.eos_token_id
+    if eos_id is not None and (not assistant_ids or assistant_ids[-1] != eos_id):
+        assistant_ids = assistant_ids + [eos_id]
     assistant_merge = builder.merge_assistant_tokens(ct_ids, assistant_ids)
     runtime_after_asst = assistant_merge.token_ids
 
